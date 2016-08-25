@@ -1,0 +1,896 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<title>Armadillo Cells</title>
+
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	<style>
+		body {
+			font-family: Monospace;
+			background-color: #000000;
+			margin: 0px;
+			overflow: hidden;
+		}
+
+		#info {
+			color: #fff;
+			position: absolute;
+			top: 10px;
+			width: 100%;
+			text-align: center;
+			z-index: 100;
+			display:block;
+
+		}
+
+		a { color: skyblue }
+		.button { background:#999; color:#eee; padding:0.2em 0.5em; cursor:pointer }
+		.highlight { background:orange; color:#fff; }
+
+		span {
+			display: inline-block;
+			width: 60px;
+			float: left;
+			text-align: center;
+		}
+
+	</style>
+</head>
+<body>
+<div id="info">
+
+</div>
+
+<script src="../build/three.min.js"></script>
+
+<script src="../libs/PLYLoader.js"></script>
+<script src="../libs/dat.gui.min.js"></script>
+<script src="../libs/OrbitControls.js"></script>
+<script src="js/Detector.js"></script>
+<script src="js/libs/stats.min.js"></script>
+<script src="../libs/jquery-1.11.1.min.js"></script>
+<script src="../libs/FileReader.js"></script>
+<script src="../libs/RecordReader.js"></script>
+<script src="../libs/VMapping.js"></script>
+<script src="../libs/VertexReader.js"></script>
+<script src="../libs/Face.js"></script>
+<script src="../libs/jQueryHashTable.js"></script>
+<script src="../libs/RecordHelperWorkerSlow.js"></script>
+<script src="../libs/HashTable.js"></script>
+<script src="../libs/Octree.js"></script>
+<script src="../libs/OctreeTest.js"></script>
+<script src="../libs/sizeof.js"></script>
+
+
+<script>
+
+	if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
+
+	var container, stats, cameraControl;
+
+	var camera, cameraTarget, scene, renderer, control, modelMaterial, modelMaterial2, wireFrameMaterial, scale, vertexMap, inverseMap;
+	//var rRecords;
+	var w, refine_Lock; //w for the web worker, refine_Lock is used for mutex locking
+	var octree;
+	var dependancyList;
+	var camMatrix;
+	var vec3;
+	var frustum;
+	var baseMesh;
+	var dir;
+	var raycaster;
+	var prevCamPos,oriCamDistance;
+	var mesh;
+	var recordsRefined;
+	//var LOD;
+	var count;
+	var log,log2,log3;
+	var recs;
+	var dT;
+	var t0,t1,t2;
+
+	init();
+	animate();
+
+	function init() {
+		//Setting the scale for the mesh
+		recordsRefined = 0;
+		baseMesh = {};
+		baseMesh.vertices = {};
+		frustum = new THREE.Frustum();
+		camMatrix = new THREE.Matrix4();
+		vec3 = new THREE.Vector3();
+		dir = new THREE.Vector3();
+		scale = 1;
+		raycaster = new THREE.Raycaster();
+
+		count = 0;
+
+		container = document.createElement( 'div' );
+		$(document.body).append( container );
+
+		camera = new THREE.PerspectiveCamera( 35, window.innerWidth / window.innerHeight, 0.1, 1500 );
+		camera.position.set( 0, 15, -400 );
+
+		cameraTarget = new THREE.Vector3( 0, 25, 0 );
+		scene = new THREE.Scene();
+		scene.fog = new THREE.Fog( 0x72645b, 2, 1500 );
+
+		prevCamPos = new THREE.Vector3().set(camera.position.x,camera.position.y,camera.position.z);
+		oriCamDistance = camera.position.distanceTo(cameraTarget);
+		// Ground
+
+		var plane = new THREE.Mesh(
+				new THREE.PlaneBufferGeometry( 4000, 4000 ),
+				new THREE.MeshPhongMaterial( { color: 0x999999, specular: 0x101010 } )
+		);
+		plane.rotation.x = -Math.PI/2;
+		plane.position.y = -50;
+		scene.add( plane );
+
+		plane.receiveShadow = true;
+
+
+		wireFrameMaterial = new THREE.MeshBasicMaterial({color:0x0000ff, wireframe: true, transparent:true});
+		modelMaterial = new THREE.MeshLambertMaterial({color:0xff0000});
+		modelMaterial2 = new THREE.MeshPhongMaterial({color:0x00ff00});
+
+		//HashTable to store records
+		dependancyList = {};
+
+
+		//Read the vertices from the file
+		var fr, fData, vData, vr, vertices, faceR, faces;
+
+		fr = new FileReader();
+		vr = new VertexReader();
+		faceR = new FaceReader();
+
+
+		//vertexMap = new Hashtable();
+		vertexMap = [];
+		inverseMap = [];
+
+		vData = fr.getData("../Armadillo2/Armadillo.ply_vertexes");
+
+		fData = fr.getData("../Armadillo2/Armadillo.ply_faces");
+		vertices = vr.parse(vData);
+		faces = faceR.parse(fData);
+
+		$.each(vertices, function(key, vertex){
+			vertexMap[vertex.oriIndex] = vertex.meshIndex;
+			inverseMap.push(vertex.oriIndex);
+		});
+
+		mesh = drawMesh(vertices,faces);
+		//baseMesh.mesh = mesh.clone();
+		scene.add(mesh);
+
+
+
+		scene.add( new THREE.AmbientLight( 0x777777 ) );
+
+
+		addShadowedLight( 1, 1, 1, 0xffffff, 1.35 );
+		addShadowedLight( 0.5, 1, -1, 0xffaa00, 1 );
+
+		// renderer
+
+		renderer = new THREE.WebGLRenderer( { antialias: true } );
+		renderer.setClearColor( scene.fog.color );
+		renderer.setPixelRatio( window.devicePixelRatio );
+		renderer.setSize( window.innerWidth, window.innerHeight );
+
+		renderer.gammaInput = true;
+		renderer.gammaOutput = true;
+
+		renderer.shadowMapEnabled = true;
+		renderer.shadowMapCullFace = THREE.CullFaceBack;
+
+
+
+		container.appendChild( renderer.domElement );
+		//container.addEventListener('keydown', onKeyDown, false);
+
+
+		cameraControl = new THREE.OrbitControls(camera, renderer.domElement);
+		cameraControl.target = cameraTarget;
+
+		window.addEventListener('keydown',onKeyDown,false);
+		window.addEventListener('mousemove',onMouseMove,false);
+		window.addEventListener('mousewheel',onCamChange,false);
+		window.addEventListener('DOMMouseScroll', onCamChange,false);
+		window.addEventListener('mouseup',onCamChange,false);
+
+		// stats
+		addStatsObject();
+
+		control = new function(){
+			this.Nothing = function(){};
+			this.Type = 2;
+			this.LOD = 1;
+			this.Num = 1;
+			this.Count = function(){
+				alert(count);
+			}
+			this.dynamic = false;
+			this.showRecords = function(){
+				showRecords(this.recordIdx,this.level);
+			};
+
+			this.showMesh = function(){
+				meshDetails();
+			};
+			this.noRaycasting = function(){
+				useViewFrustum(false);
+			};
+			this.useRaycasting = function(){
+				useViewFrustum(true);
+			};
+
+
+			this.camera = function(){
+				cameraDetails();
+			};
+
+
+			this.getLOD = function() {
+				showLOD();
+			};
+			this.cells = function(){
+				useOctreeCells();
+			}
+			this.cellsz = function(){
+				console.log("Started");
+				useOctreeCells(true);
+			}
+			this.distance = function(){
+				console.log(getCameraDistance());
+			}
+
+
+		};
+		addControlGui(control);
+
+		LOD = control.LOD;
+		count = 0;
+		// resize
+		log = "";log2="";log3="";
+		window.addEventListener( 'resize', onWindowResize, false );
+
+
+		var rp = new Refinement();
+
+		//Simualting having the records already in the background
+
+		var rRecords = rp.parse(fr.getData("../Armadillo2/Armadillo.ply_refine"));
+
+		//var t1 = performance.now();
+		createHierarchy(rRecords);
+		dT = JSON.stringify(dependancyList);
+
+		//var t2 = performance.now() - t1;
+		//console.log("Create Hierarchy Time : " + t2.toString());
+
+		refine_Lock = false;
+
+		if(typeof(w)=="undefined") {
+			w = new Worker('../libs/RecordHelperInfo5.js');
+		}
+
+		w.onmessage = function(event){
+			var wData = JSON.parse(event.data);
+			
+
+			inverseMap = wData.iMap;
+			try {
+				vertexMap = invertMap(wData.iMap);
+				var nMesh = drawNM(wData.vertices, wData.faces, wData.iMap);
+				nMesh.material = modelMaterial;
+
+				scene.remove(mesh);
+				nMesh.name = "mesh";
+				nMesh.material = mesh.material;
+				scene.add(nMesh);
+				mesh = nMesh;
+				refine_Lock = false;
+
+			}
+			catch (e) {
+				console.log(e);
+			}
+			
+
+		};
+
+	}
+
+
+	function drawMesh(vertices,faces){
+
+		var geo = new THREE.Geometry();
+
+		//push vertices into geometry
+		$.each(vertices,function(key,value){
+			geo.vertices.push(value.point);
+			baseMesh.vertices[value.oriIndex] = value.point;
+		});
+
+		$.each(faces, function(key,value){
+			var face3 = getFace3(value);
+			geo.faces.push(face3);
+		});
+
+
+		geo.computeFaceNormals();
+		geo.computeVertexNormals();
+		geo.computeBoundingBox();
+
+
+
+		//Boundingbox variables
+		var min = geo.boundingBox.min.clone();
+		var max = geo.boundingBox.max.clone();
+
+		//Getting parameters for Octree
+		var size = max.sub(min);
+		var octreePosition = min;
+		//uncomment following if top does not work
+		//var octreePosition = new THREE.Vector3(min.x,min.y,max.z);
+
+		var numPoints = vertices.length;
+		var maxLv = Math.floor(Math.log(numPoints) / Math.log(8));
+		try {
+
+				octree = new Octree(octreePosition, size,maxLv);
+		}
+		catch(exc){console.log("Creating Octree Error"); console.log(exc);}
+
+		//Add each vertex in the base mesh into an octree
+		$.each(vertices,function(key,value){
+			try {
+				octree.add(value.point, {index:value.oriIndex, LOD:0});
+			}
+			catch(exc){
+				console.log("Add Octree Error");
+				console.log(exc);
+			}
+			var rec = new RecordNode("Base");
+			dependancyList[value.oriIndex] = rec;
+		});
+
+
+
+		var model = new THREE.Mesh(geo,modelMaterial);
+		//model.scale.set(scale,scale,scale);
+		model.name = 'mesh';
+
+		return model;
+	}
+
+	function createHierarchy(rRecords){
+		var maxLv = 0;
+		$.each(rRecords,function(idx,record){
+			var parentIdx = record.V1idx;
+			var currIdx = record.V2idx;
+			var parentLv = dependancyList[parentIdx].Level;
+			if(parentLv+1 > maxLv){
+				maxLv = parentLv;
+			}
+			var newRecord = new RecordNode(record, parentLv+1);
+
+			newRecord.parents.push(parentIdx);
+
+			$.each(record.keptRev,function(k,kR){
+				newRecord.parents.push(kR);
+
+			});
+
+			$.each(record.revKept,function(k,rK){
+				if($.inArray(rK,newRecord.parents)===-1){
+					newRecord.parents.push(rK);
+				}
+			});
+
+			$.each(record.oriFaces,function(k,oriFace){
+				if($.inArray(oriFace.B,newRecord.parents)==-1){
+					newRecord.parents.push(oriFace.B);
+				}
+			});
+			$.each(record.oriFaces,function(k,oriFace){
+				if($.inArray(oriFace.C,newRecord.parents)==-1){
+					newRecord.parents.push(oriFace.C);
+				}
+			});
+
+			$.each(newRecord.parents,function(k,parent){
+				if(dependancyList[parent].Level >=  newRecord.Level){
+					newRecord.Level = dependancyList[parent].Level + 1;
+				}
+			});
+
+
+			dependancyList[currIdx] = newRecord;
+			dependancyList[parentIdx].children.push(currIdx);
+
+		});
+		dependancyList['maxLv'] = maxLv;
+	}
+
+	function meshDetails(){
+		console.log(scene.getObjectByName('mesh').geometry);
+	}
+
+	function getRecords(arr,LOD){
+		var records = [];
+
+		//var maxRecords = LOD * 1000; //Only allow ~2500 records per level to be
+		try {
+			$.each(arr, function (k, v) {
+				if (LOD > dependancyList['maxLv']) {
+					LOD = dependancyList['maxLv'];
+				}
+				//if(records.length < maxRecords) {
+				getRecordChildren(records, v.index, LOD);
+				//}
+			});
+		}
+		catch(e){console.log(e);}
+
+		return records;
+
+	}
+
+	function active(index){
+		return dependancyList[index].active;
+	}
+
+	function getRecordParents(records,record){
+		$.each(record.parents,function(key,parentIdx){
+			var parentRecord = dependancyList[parentIdx];
+			if(!parentRecord.active){
+				getRecordParents(records,parentRecord);
+				parentRecord.active = true;
+				records.push(parentRecord.record);
+			}
+		});
+	}
+
+	function getRecordChildren(records,index,level){
+
+		var addRecord = dependancyList[index];
+		var numChildren = Math.floor(addRecord.children.length * percentageChildren(level));
+		var contains = true;
+
+		if(addRecord.record != "Base"){
+			contains = frustum.containsPoint(addRecord.record.point);
+		}
+		//Only add record if it is in frustum
+		if(contains) {
+
+			if (addRecord.Level < level && numChildren > 0) {
+				for (var i = 0; i < numChildren; i++) {
+					getRecordChildren(records, addRecord.children[i], level);
+				}
+			}
+			if (!addRecord.active) {
+				getRecordParents(records, addRecord);
+				records.push(addRecord.record);
+				addRecord.active = true;
+			}
+		}
+	}
+
+	function refine(recs){
+		var oldMesh = scene.getObjectByName('mesh');
+		var vertices = JSON.stringify(oldMesh.geometry.vertices);
+		var faces = JSON.stringify(oldMesh.geometry.faces);
+		var iMap = JSON.stringify(inverseMap);
+		var jRecs = JSON.stringify(recs);
+
+
+		if(!refine_Lock) {
+			refine_Lock = true;
+			w.postMessage({recs: jRecs, vertices: vertices, faces: faces, iMap: iMap});
+		}
+		else{
+			console.log("Already refine_Lock");
+		}
+
+	}
+
+	function drawNM(vertices,faces,iMap){
+		var newGeo = new THREE.Geometry();
+
+
+		vertices.items.forEach(function(vertex){
+			if(vertex != null){
+				newGeo.vertices.push(getVertexFromPoint(vertex));
+			}
+		});
+
+		faces.forEach(function(face){
+			newGeo.faces.push(getFace3(face));
+		});
+
+
+		try {
+
+			newGeo.computeFaceNormals();
+			newGeo.computeVertexNormals();
+		}
+		catch(Exc){
+			console.log(Exc);
+		}
+
+		var mesh = new THREE.Mesh(newGeo);
+
+
+
+		return mesh;
+	}
+
+
+
+
+
+	function addStatsObject(){
+		stats = new Stats();
+		stats.domElement.style.position = 'absolute';
+		stats.domElement.style.top = '0px';
+		//container.appendChild( stats.domElement );
+	}
+
+	function addControlGui(controlObject) {
+		var gui = new dat.GUI();
+		gui.add(controlObject,'Nothing').name("");
+		gui.add(controlObject, 'Type').options({'Mesh': 1, 'Lines': 2}).onChange(function (){
+			if(controlObject.Type == 2){
+				scene.getObjectByName('mesh').material = wireFrameMaterial;
+			}
+			else{
+				scene.getObjectByName('mesh').material = modelMaterial;
+
+			}
+		});
+		gui.add(controlObject, "LOD").name("LOD").options({0:0,1:1,5:5,10:10,15:15,20:20,25:25,30:30,35:35,40:40,45:45,50:50});
+		//gui.add(controlObject, "Num").name("Num").options({1:1,10:10,100:100,200:200,300:300,500:500,1000:1000});
+		//gui.add(controlObject, "camera");
+
+		//gui.add(controlObject, "noRaycasting").name("No Octree Cells");
+		//gui.add(controlObject, "cells").name("Use Octree Cells");
+		gui.add(controlObject, "cellsz").name("Refine");
+		//gui.add(controlObject, "distance");
+		//gui.add(controlObject, "Count");
+	}
+
+	function getVertex(floatArray){
+		return new THREE.Vector3(floatArray[0], floatArray[1], floatArray[2]);
+	}
+
+	function getVertexFromPoint(point){
+		return new THREE.Vector3(point.x,point.y,point.z);
+	}
+
+	//Creates a THREE.js Face object based by getting the value of the face in this current mesh
+	//Based on the vertex mapping
+	function getFace(face,vi){
+		return new THREE.Face3(vi.get(face.a),vi.get(face.b),vi.get(face.c));
+	}
+
+	function getFace2(face,vi){
+
+		return new THREE.Face3(vi[face.a],vi[face.b],vi[face.c]);
+		//return new THREE.Face3(vi[face.a],vi[face.b],vi[face.c]);
+	}
+	function getFace3(face){
+		return new THREE.Face3(vertexMap[face.a],vertexMap[face.b],vertexMap[face.c]);
+	}
+
+
+	function addShadowedLight( x, y, z, color, intensity ) {
+
+		var directionalLight = new THREE.DirectionalLight( color, intensity );
+		directionalLight.position.set( x, y, z )
+		scene.add( directionalLight );
+
+		directionalLight.castShadow = true;
+		// directionalLight.shadowCameraVisible = true;
+
+		var d = 1;
+		directionalLight.shadowCameraLeft = -d;
+		directionalLight.shadowCameraRight = d;
+		directionalLight.shadowCameraTop = d;
+		directionalLight.shadowCameraBottom = -d;
+
+		directionalLight.shadowCameraNear = 1;
+		directionalLight.shadowCameraFar = 4;
+
+		directionalLight.shadowMapWidth = 1024;
+		directionalLight.shadowMapHeight = 1024;
+
+		directionalLight.shadowBias = -0.005;
+		directionalLight.shadowDarkness = 0.15;
+
+	}
+
+	function onWindowResize() {
+
+		camera.aspect = window.innerWidth / window.innerHeight;
+		camera.updateProjectionMatrix();
+
+		renderer.setSize( window.innerWidth, window.innerHeight );
+
+	}
+
+	function animate() {
+
+		requestAnimationFrame( animate );
+
+		render();
+
+		stats.update();
+		cameraControl.update();
+		camera.updateMatrix();
+
+	}
+
+	function render() {
+
+		renderer.render( scene, camera );
+
+	}
+
+	function cameraDetails(){
+		console.log(camera.position);
+		console.log(cameraControl.target);
+	}
+
+
+	function onKeyDown(event){
+		try {
+			cameraControl.onKeyDown(event);
+		}
+		catch(e){console.log(e);}
+	}
+
+	function getFOV(distance){
+		var dist = camera.position.distanceTo(cameraControl.target);
+		var vFOV = camera.fov * Math.PI / 180;        // convert vertical fov to radians
+		var height = 2 * Math.tan(vFOV / 2) * dist; // visible height
+
+		var aspect = camera.aspect;
+
+		var width = height * aspect;
+
+		return {height:height, width:width}
+
+	}
+
+	function getCameraDistance(){
+		return camera.position.distanceTo(cameraControl.target);
+	}
+
+	function useViewFrustum(useRaycasting) {
+		if (!refine_Lock) {
+			frustum.setFromMatrix(camMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+			var LOD = getLODNaive();
+			
+			try {
+				var pts = octree.getFrustumPoints(frustum);
+				
+				var pts2 = [];
+
+				if(!useRaycasting) {
+					console.log(pts.length);
+					$.each(pts, function (key, obj) {
+						var vec = baseMesh.vertices[obj.index];
+						if (frustum.containsPoint(vec)) {
+							pts2.push(obj);
+						}
+					});
+				}
+				else{
+					$.each(pts,function(key, obj){
+						var vec = baseMesh.vertices[obj.index];
+						if(frustum.containsPoint(vec)){
+							if(!vectorBlocked(vec,obj.index,time)){
+								pts2.push(obj);
+							}
+						}
+					});
+					pts2 = getNonBlockedVertices(pts,time);
+
+				}
+				var records = getRecords(pts2,LOD);
+
+				if(records.length > 0) {
+					console.log("Refining " + records.length.toString() + " records");
+
+					recordsRefined += records.length;
+					refine(records);
+
+				}
+
+			}
+
+			catch (e) {
+				console.log(e);
+			}
+
+
+
+		}
+	}
+	function vectorBlocked(vector,index,time){
+		var blocked = true;
+		var t3 = performance.now();
+
+		dir.subVectors(vector,camera.position).normalize();
+		raycaster.set(camera.position,dir);
+
+		var t4 = performance.now();
+		time.a += t4-t3;
+		var intersected = raycaster.intersectObject(baseMesh.mesh);
+		if(intersected.length > 0){
+			if(vertexInView(intersected[0].face,index)){
+				blocked = false;
+			}
+		}
+		time.b += performance.now() - t4;
+		return blocked;
+	}
+
+	function getNonBlockedVertices(points,time){
+		var nonBlocked = [];
+		$.each(points,function(key,point){
+			var vertex = baseMesh.vertices[point.index];
+			if(frustum.containsPoint(vertex)){
+				var t1 = performance.now();
+
+				dir.subVectors(vertex,camera.position).normalize();
+				raycaster.set(camera.position,dir);
+
+				var t2 = performance.now();
+				time.a += t2-t1;
+				var intersected = raycaster.intersectObject(mesh);
+				if(intersected.length > 0){
+					if(vertexInView(intersected[0].face,point.index)){
+						nonBlocked.push(point);
+					}
+				}
+				time.b += performance.now() - t2;
+			}
+		});
+
+		return nonBlocked;
+	}
+
+	function vertexInView(face,idx){
+
+		return idx == inverseMap[face.a] || idx == inverseMap[face.b] || idx == inverseMap[face.c];
+	}
+
+	function onMouseMove(event){
+		if(control.dynamic){
+			//console.log(event.button);
+		}
+	}
+
+	function onCamChange(event){
+		if(control.dynamic){
+			console.log("Cam changed");
+			if(!refine_Lock){
+				var camDistance = prevCamPos.distanceTo(camera.position);
+				if(camDistance > 30){
+					prevCamPos.set(camera.position.x,camera.position.y,camera.position.z);
+					useViewFrustum(true);
+					//console.log("LOD : "+ getLOD());
+				}
+
+			}
+		}
+
+	}
+
+	function getLODNaive(){
+		var LOD = control.LOD;
+		/* //Naive way of getting LOD
+		var gradient = Math.sqrt(dependancyList['maxLv'])/ Math.sqrt(oriCamDistance);
+
+
+		var y = Math.sqrt(getCameraDistance()) * gradient;
+		y *= y;
+
+		var LOD =  Math.floor( dependancyList['maxLv']-y);
+		if(LOD <= 0){LOD = 1};
+		*/
+		return LOD;
+	}
+
+	function percentageChildren(LOD){
+		return LOD / dependancyList['maxLv'];
+	}
+
+	function showLOD(){
+		console.log(getLODNaive());
+	}
+
+	function outputRefinementDetails(){
+		//console.log("Number of vertices : "+ mesh.geometry.vertices.length.toString());
+		//console.log("Number of faces : "+ mesh.geometry.faces.length.toString());
+		console.log("Total records Refined " + recordsRefined.toString() );
+	}
+
+	function addTabs(num){
+		var tabs = "";
+		for(var i=0;i<num; i++){
+			tabs = tabs + "\t";
+		}
+		return tabs;
+	}
+
+	function invertMap(iMap){
+		var vMap = [];
+		$.each(iMap, function(key,value){
+			vMap[value] = key;
+		});
+
+		return vMap;
+	}
+
+	function useOctreeCells(useZ){
+		if(!refine_Lock) {
+			/*Gets the cells from the octree in the frustum and sorts them by their z-distance from the camera, taking the
+			 closest 50% (could modify to take different number based on LOD */
+			frustum.setFromMatrix(camMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+			var cells = octree.getFrustumCells(frustum);
+
+
+//			var totalCells = octree.getNumCells();
+
+//			console.log(cells.length/ totalCells);
+
+
+			var front = Math.floor(cells.length *  5/ 8);
+			if(useZ) {
+				cells.sort(sortCellz);
+			}
+			else {
+				cells.sort(sortCells);
+			}
+			cells.splice(front);
+			var pts = [];
+			$.each(cells, function (k, cell) {
+				cell.addData(pts);
+			});
+			recs = getRecords(pts, getLODNaive());
+
+			if(recs.length > 0) {
+				refine(recs);
+			}
+		}
+
+	}
+
+	function sortCells(a,b){
+		return a.center.distanceTo(camera.position) > b.center.distanceTo(camera.position);
+	}
+
+	function sortCellz(a,b){
+		return Math.abs(a.center.z - camera.position.z) > Math.abs(b.center.z - camera.position.z);
+	}
+
+
+
+
+
+
+
+
+</script>
+</body>
+</html>
+
